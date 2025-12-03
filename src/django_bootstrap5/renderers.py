@@ -22,6 +22,41 @@ from .text import text_value
 from .utils import render_template_file
 from .widgets import RadioSelectButtonGroup, ReadOnlyPasswordHashWidget, is_widget_with_placeholder
 
+# Known parameters for BaseRenderer and FieldRenderer.
+# Any kwargs not in this set will be treated as extra widget attributes.
+KNOWN_FIELD_PARAMS = frozenset(
+    {
+        # BaseRenderer params
+        "layout",
+        "wrapper_class",
+        "inline_wrapper_class",
+        "field_class",
+        "label_class",
+        "show_help",
+        "show_label",
+        "exclude",
+        "set_placeholder",
+        "size",
+        "horizontal_label_class",
+        "horizontal_field_class",
+        "horizontal_field_offset_class",
+        "checkbox_layout",
+        "checkbox_style",
+        "inline_field_class",
+        "server_side_validation",
+        "error_css_class",
+        "required_css_class",
+        "success_css_class",
+        "alert_error_type",
+        # FieldRenderer-specific params
+        "placeholder",
+        "addon_before",
+        "addon_after",
+        "addon_before_class",
+        "addon_after_class",
+    }
+)
+
 
 class BaseRenderer:
     """A content renderer."""
@@ -247,6 +282,17 @@ class FieldRenderer(BaseRenderer):
             else success_css_class
         )
 
+        # Extract extra attributes to be applied to the widget.
+        # If the key already contains a hyphen, use it as-is.
+        # Otherwise, convert underscores to hyphens for backward compatibility.
+        self.extra_attrs = {}
+        for key, value in kwargs.items():
+            if key not in KNOWN_FIELD_PARAMS:
+                # Only convert underscores if there are no hyphens in the key
+                if "-" not in key:
+                    key = key.replace("_", "-")
+                self.extra_attrs[key] = value
+
     @property
     def is_floating(self):
         return (
@@ -348,12 +394,19 @@ class FieldRenderer(BaseRenderer):
         for widget in widgets:
             self.add_widget_class_attrs(widget)
             self.add_placeholder_attrs(widget)
+            self.add_extra_attrs(widget)
             if isinstance(widget, (RadioSelect, CheckboxSelectMultiple)) and not isinstance(
                 widget, RadioSelectButtonGroup
             ):
                 widget.template_name = "django_bootstrap5/widgets/radio_select.html"
             elif isinstance(widget, ClearableFileInput):
                 widget.template_name = "django_bootstrap5/widgets/clearable_file_input.html"
+
+    def add_extra_attrs(self, widget=None):
+        """Add extra attributes to widget."""
+        if widget is None:
+            widget = self.widget
+        widget.attrs.update(self.extra_attrs)
 
     def get_label_class(self, horizontal=False):
         """Return CSS class for label."""

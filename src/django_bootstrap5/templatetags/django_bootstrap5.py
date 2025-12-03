@@ -1,9 +1,10 @@
+import re
 from math import floor
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from django import template
 from django.contrib.messages import constants as message_constants
-from django.template import Context
+from django.template import Context, Node, TemplateSyntaxError
 from django.utils.http import urlencode
 
 from ..components import render_alert, render_button
@@ -30,6 +31,28 @@ MESSAGE_ALERT_TYPES = {
 }
 
 register = template.Library()
+
+# Regex to match attribute=value pairs in bootstrap_field tag.
+# Supports: regular attrs, hyphens (data-foo), @ (Vue/Alpine @click), :: (Vue v-bind::class)
+# Also supports boolean attributes without values (e.g., "disabled", "required")
+ATTRIBUTE_RE = re.compile(
+    r"""
+    ^
+    (?P<attr>
+        [@\w:_.-]+       # attribute name: allows @ . - : _ and word chars
+    )
+    (?:
+        =
+        (?P<value>
+            "(?P<dquote>[^"]*)"|    # double-quoted value
+            '(?P<squote>[^']*)'|    # single-quoted value
+            (?P<unquoted>[^\s]+)    # unquoted value (no spaces)
+        )
+    )?                              # value is optional (for boolean attributes)
+    $
+    """,
+    re.VERBOSE | re.UNICODE,
+)
 
 
 @register.simple_tag
@@ -350,8 +373,8 @@ def bootstrap_form_errors(form, **kwargs):
     return render_form_errors(form, **kwargs)
 
 
-@register.simple_tag
-def bootstrap_field(field, **kwargs):
+@register.tag("bootstrap_field")
+def do_bootstrap_field(parser, token):
     """
     Render a field.
 
@@ -472,6 +495,12 @@ def bootstrap_field(field, **kwargs):
 
             :default: ``'has-success'``. Can be changed :doc:`settings`
 
+        **kwargs
+            Any additional keyword arguments will be set as HTML attributes on the
+            input element. Attribute names can include hyphens (e.g., ``data-value``).
+            Underscores are also converted to hyphens for backward compatibility
+            (e.g., ``data_value`` becomes ``data-value``).
+
     **Usage**::
 
         {% bootstrap_field field %}
@@ -479,8 +508,66 @@ def bootstrap_field(field, **kwargs):
     **Example**::
 
         {% bootstrap_field field show_label=False %}
+
+        {% bootstrap_field field placeholder="Search..." data-autocomplete="off" %}
     """
-    return render_field(field, **kwargs)
+    bits = token.split_contents()
+    tag_name = bits[0]
+
+    if len(bits) < 2:
+        raise TemplateSyntaxError(f"'{tag_name}' tag requires at least one argument (the form field)")
+
+    # First argument is the field
+    field_expr = parser.compile_filter(bits[1])
+
+    # Parse remaining arguments as key=value pairs or boolean attributes
+    kwargs = {}
+    for bit in bits[2:]:
+        match = ATTRIBUTE_RE.match(bit)
+        if not match:
+            raise TemplateSyntaxError(
+                f"'{tag_name}' tag received invalid argument: {bit}. "
+                f'Arguments should be in the form attr="value" or attr for boolean attributes.'
+            )
+        attr = match.group("attr")
+        value_group = match.group("value")
+
+        if value_group is None:
+            # Boolean attribute (no value) - use True
+            kwargs[attr] = parser.compile_filter("True")
+        else:
+            # Get value from whichever group matched
+            dquote = match.group("dquote")
+            squote = match.group("squote")
+            unquoted = match.group("unquoted")
+
+            if dquote is not None:
+                # Double-quoted string literal
+                kwargs[attr] = parser.compile_filter(f'"{dquote}"')
+            elif squote is not None:
+                # Single-quoted string literal
+                kwargs[attr] = parser.compile_filter(f"'{squote}'")
+            else:
+                # Unquoted - could be a variable or literal
+                kwargs[attr] = parser.compile_filter(unquoted)
+
+    return BootstrapFieldNode(field_expr, kwargs)
+
+
+class BootstrapFieldNode(Node):
+    """Render a bootstrap field with the given attributes."""
+
+    def __init__(self, field, kwargs):
+        self.field = field
+        self.kwargs = kwargs
+
+    def render(self, context):
+        field = self.field.resolve(context)
+        # Resolve all kwarg values
+        resolved_kwargs = {}
+        for key, value in self.kwargs.items():
+            resolved_kwargs[key] = value.resolve(context)
+        return render_field(field, **resolved_kwargs)
 
 
 @register.simple_tag
